@@ -32,10 +32,10 @@ import com.nasller.codeglance.util.Util.isMarkAttributes
 import it.unimi.dsi.fastutil.objects.ObjectArrayList
 import org.jetbrains.concurrency.CancellablePromise
 import org.slf4j.LoggerFactory
-import java.awt.Color
 import java.awt.image.BufferedImage
 import java.beans.PropertyChangeEvent
 import java.lang.reflect.Proxy
+import java.util.*
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
@@ -77,10 +77,9 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 						invokeLater(modalityState){
 							lock.set(false)
 							glancePanel.repaint()
-							if (myRenderDirty.get() || myScrollState.scale != scrollState.scale ||
+							if (myRenderDirty.getAndSet(false) || myScrollState.scale != scrollState.scale ||
 									myScrollState.getRenderHeight() != scrollState.getRenderHeight()) {
 								updateMinimapImage()
-								myRenderDirty.set(false)
 							}
 						}
 					}
@@ -90,7 +89,7 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 				glancePanel.psiDocumentManager.performForCommittedDocument(myDocument, action)
 			}else action.run()
 		}else {
-			myRenderDirty.compareAndSet(false,true)
+			myRenderDirty.set(true)
 		}
 	}
 
@@ -105,9 +104,13 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 			if(pixelsPerLine < 1){
 				getBufferedImage(myScrollState)
 			}else {
-				val height = max(myScrollState.documentHeight.toDouble(), copyList.filterNotNull().sumOf {
-					it.getLineHeight(pixelsPerLine, scale) + it.aboveBlockLine * scale
-				} + (5 * pixelsPerLine))
+				var contentHeight = 5 * pixelsPerLine
+				for (lineData in copyList) {
+					if(lineData != null) {
+						contentHeight += lineData.getLineHeight(pixelsPerLine, scale) + lineData.aboveBlockLine * scale
+					}
+				}
+				val height = max(myScrollState.documentHeight.toDouble(), contentHeight)
 				BufferedImage(
 					getRasterWidth(glancePanel.getLogicalWidth(), pixScale),
 					getRasterHeight(height, pixScale),
@@ -158,9 +161,9 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 					null -> if(preSetPixelY != totalY.toInt()){
 						var curX = it.startX ?: 0
 						val curY = totalY.toInt()
-						breakY@ for (renderData in it.renderData) {
-							(renderData.rgb ?: defaultRgb).setColorRgb()
-							for (char in renderData.renderChar) {
+						breakY@ for ((renderChar, rgb) in it.renderData) {
+							(rgb ?: defaultRgb).setColorRgb()
+							for (char in renderChar) {
 								curX += when (char.code) {
 									9 -> 4 //TAB
 									10 -> break@breakY
@@ -258,7 +261,7 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 				if(markCommentMap.containsKey(start)) {
 					renderDataList[visualLine] = LineRenderData(emptyArray(), 2, aboveBlockLine,
 						LineType.MARK, commentHighlighterEx = markCommentMap[start])
-				}else if(start < text.length && text.subSequence(start, end).isNotBlank()){
+				}else if(start < text.length && start < end){
 					val hlIter = editor.highlighter.run {
 						if(this is EmptyEditorHighlighter) OneLineHighlightDelegate(text, start, end)
 						else{
@@ -272,8 +275,11 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 					}
 					if(hlIter is OneLineHighlightDelegate || !hlIter.atEnd()){
 						val renderList = mutableListOf<RenderData>()
+						val resolvedHighlightRanges = resolveHighlightRanges(start, end, getHighlightColor(start, end))
+						var highlightRangeIndex = 0
 						var foldLineIndex = visLinesIterator.getStartFoldingIndex()
 						var width = 0
+						var lineHasVisibleChars = false
 						do {
 							checkCanceled()
 							var curStart = hlIter.start.run{ if(start > this) start else this }
@@ -284,6 +290,7 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 								val foldEndOffset = foldRegion!!.endOffset
 								val foldText = StringUtil.replace(foldRegion.placeholderText, "\n", " ").toCharArray()
 								width += foldText.size
+								lineHasVisibleChars = lineHasVisibleChars || foldText.any { !it.isWhitespace() }
 								renderList.add(RenderData(foldText, editor.foldingModel.placeholderAttributes?.foregroundColor?.rgb))
 								foldRegion = visLinesIterator.getFoldRegion(++foldLineIndex)
 								foldStartOffset = foldRegion?.startOffset ?: -1
@@ -296,43 +303,60 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 								}
 							}
 							//CODE
-							val renderStr = CharArrayUtil.fromSequence(text, curStart, curEnd)
+							val renderStr = CharArray(curEnd - curStart)
+							var segmentHasVisibleChars = false
+							for (index in renderStr.indices) {
+								val char = text[curStart + index]
+								renderStr[index] = char
+								if (!segmentHasVisibleChars && !char.isWhitespace()) segmentHasVisibleChars = true
+							}
 							width += renderStr.size
-							if(renderStr.isEmpty() || renderStr.all { it.isWhitespace() }) {
+							lineHasVisibleChars = lineHasVisibleChars || segmentHasVisibleChars
+							if(!segmentHasVisibleChars) {
 								renderList.add(RenderData(renderStr))
 							}else{
-								val highlightList = getHighlightColor(curStart, curEnd)
-								if(highlightList.isNotEmpty()){
-									if(highlightList.size == 1 && highlightList.first().run{ startOffset == curStart && endOffset == curEnd }){
-										renderList.add(RenderData(renderStr.firstLine(), highlightList.first().foregroundColor.rgb))
-									}else {
-										val lexerColor = runCatching { hlIter.textAttributes.foregroundColor }.getOrNull()
-											?: editor.colorsScheme.defaultForeground
-										var nextOffset = curStart
-										var preColor: Color? = null
-										for(offset in curStart .. curEnd){
-											val color = highlightList.firstOrNull {
-												offset >= it.startOffset && offset < it.endOffset
-											}?.foregroundColor ?: lexerColor
-											if(preColor != null && preColor !== color){
-												renderList.add(RenderData(CharArrayUtil.fromSequence(text, nextOffset,offset), preColor.rgb))
-												nextOffset = offset
-											}
-											preColor = color
-										}
-										if(nextOffset < curEnd){
-											renderList.add(RenderData(CharArrayUtil.fromSequence(text, nextOffset, curEnd), preColor?.rgb))
-										}
-									}
-								}else {
+								while (highlightRangeIndex < resolvedHighlightRanges.size &&
+									resolvedHighlightRanges[highlightRangeIndex].endOffset <= curStart) {
+									highlightRangeIndex++
+								}
+								val hasHighlight = highlightRangeIndex < resolvedHighlightRanges.size &&
+									resolvedHighlightRanges[highlightRangeIndex].startOffset < curEnd
+								if(!hasHighlight) {
 									renderList.add(RenderData(renderStr.firstLine(),
 										runCatching { hlIter.textAttributes.foregroundColor?.rgb }.getOrNull()))
+								}else {
+									val lexerRgb = runCatching { hlIter.textAttributes.foregroundColor?.rgb }.getOrNull()
+										?: editor.colorsScheme.defaultForeground.rgb
+									var nextOffset = curStart
+									var currentHighlightIndex = highlightRangeIndex
+									while (currentHighlightIndex < resolvedHighlightRanges.size) {
+										val highlightRange = resolvedHighlightRanges[currentHighlightIndex]
+										if(highlightRange.startOffset >= curEnd) break
+										val highlightStart = max(nextOffset, highlightRange.startOffset)
+										if(nextOffset < highlightStart) {
+											renderList.add(RenderData(CharArrayUtil.fromSequence(text, nextOffset, highlightStart), lexerRgb))
+										}
+										val highlightEnd = min(curEnd, highlightRange.endOffset)
+										if(highlightStart < highlightEnd) {
+											val highlightChars = if(highlightStart == curStart && highlightEnd == curEnd) {
+												renderStr.firstLine()
+											}else CharArrayUtil.fromSequence(text, highlightStart, highlightEnd)
+											renderList.add(RenderData(highlightChars, highlightRange.rgb))
+											nextOffset = highlightEnd
+										}
+										if(highlightRange.endOffset > curEnd) break
+										currentHighlightIndex++
+									}
+									if(nextOffset < curEnd) {
+										renderList.add(RenderData(CharArrayUtil.fromSequence(text, nextOffset, curEnd), lexerRgb))
+									}
 								}
 							}
 							hlIter.advance()
 						}while (!hlIter.atEnd() && hlIter.start < end)
-						renderDataList[visualLine] = LineRenderData(renderList.mergeSameRgbCharArray(),
-							visLinesIterator.getStartsWithSoftWrap()?.indentInColumns, aboveBlockLine)
+						renderDataList[visualLine] = if (lineHasVisibleChars) { LineRenderData(renderList.mergeSameRgbCharArray(),
+								visLinesIterator.getStartsWithSoftWrap()?.indentInColumns, aboveBlockLine)
+						} else DefaultLineRenderData
 					}else {
 						renderDataList[visualLine] = DefaultLineRenderData
 					}
@@ -350,22 +374,84 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 		0 -> emptyArray()
 		1 -> arrayOf(first())
 		else -> {
-			var preData = get(0)
-			iterator().let { iter ->
-				if (iter.hasNext()) iter.next()// Skip first
-				while (iter.hasNext()){
-					val data = iter.next()
-					if(preData.canMerge || data.canMerge || preData.rgb == data.rgb){
-						preData.renderChar += data.renderChar
-						preData.rgb = preData.rgb ?: data.rgb
-						iter.remove()
-					}else {
-						preData = data
-					}
+			val mergedData = ArrayList<RenderData>(size)
+			var groupStart = 0
+			var groupLength = first().renderChar.size
+			var groupRgb = first().rgb
+			var groupCanMerge = first().renderChar.all { it.isWhitespace() }
+			for (index in 1 until size) {
+				val data = get(index)
+				val dataCanMerge = data.renderChar.all { it.isWhitespace() }
+				if(groupCanMerge || dataCanMerge || groupRgb == data.rgb){
+					groupLength += data.renderChar.size
+					groupRgb = groupRgb ?: data.rgb
+					groupCanMerge = groupCanMerge && dataCanMerge
+				}else {
+					mergedData.add(mergeRenderData(groupStart, index, groupLength, groupRgb))
+					groupStart = index
+					groupLength = data.renderChar.size
+					groupRgb = data.rgb
+					groupCanMerge = false
 				}
 			}
-			toTypedArray()
+			mergedData.add(mergeRenderData(groupStart, size, groupLength, groupRgb))
+			mergedData.toTypedArray()
 		}
+	}
+
+	private fun MutableList<RenderData>.mergeRenderData(startIndex: Int, endIndex: Int, mergedLength: Int, rgb: Int?): RenderData {
+		if (endIndex - startIndex == 1) return get(startIndex)
+		val mergedChars = CharArray(mergedLength)
+		var destinationOffset = 0
+		for (index in startIndex until endIndex) {
+			val chars = get(index).renderChar
+			chars.copyInto(mergedChars, destinationOffset)
+			destinationOffset += chars.size
+		}
+		return RenderData(mergedChars, rgb)
+	}
+
+	private fun resolveHighlightRanges(startOffset: Int, endOffset: Int, highlights: List<RangeHighlightColor>): List<ResolvedHighlightRange> {
+		if (startOffset >= endOffset || highlights.isEmpty()) return emptyList()
+		val events = ArrayList<HighlightEvent>(highlights.size * 2)
+		for ((priority, highlight) in highlights.withIndex()) {
+			val start = highlight.startOffset.coerceIn(startOffset, endOffset)
+			val end = highlight.endOffset.coerceIn(startOffset, endOffset)
+			if(start < end) {
+				events.add(HighlightEvent(start, priority, true))
+				events.add(HighlightEvent(end, priority, false))
+			}
+		}
+		if(events.isEmpty()) return emptyList()
+		events.sortBy { it.offset }
+		val activePriorities = TreeSet<Int>()
+		val resolvedRanges = mutableListOf<ResolvedHighlightRange>()
+		var previousOffset = startOffset
+		var eventIndex = 0
+		while (eventIndex < events.size) {
+			val offset = events[eventIndex].offset
+			if(previousOffset < offset && activePriorities.isNotEmpty()) {
+				resolvedRanges.addOrMerge(previousOffset, offset, highlights[activePriorities.first()].foregroundColor.rgb)
+			}
+			while (eventIndex < events.size && events[eventIndex].offset == offset) {
+				val event = events[eventIndex]
+				if(event.activate) activePriorities.add(event.priority)
+				else activePriorities.remove(event.priority)
+				eventIndex++
+			}
+			previousOffset = offset
+		}
+		if(previousOffset < endOffset && activePriorities.isNotEmpty()) {
+			resolvedRanges.addOrMerge(previousOffset, endOffset, highlights[activePriorities.first()].foregroundColor.rgb)
+		}
+		return resolvedRanges
+	}
+
+	private fun MutableList<ResolvedHighlightRange>.addOrMerge(startOffset: Int, endOffset: Int, rgb: Int) {
+		val lastRange = lastOrNull()
+		if(lastRange != null && lastRange.endOffset == startOffset && lastRange.rgb == rgb) {
+			lastRange.endOffset = endOffset
+		}else add(ResolvedHighlightRange(startOffset, endOffset, rgb))
 	}
 
 	private fun checkCanceled(){
@@ -704,16 +790,14 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 			var result = renderData.contentHashCode()
 			result = 31 * result + (startX ?: 0)
 			result = 31 * result + aboveBlockLine
-			result = 31 * result + (lineType?.hashCode() ?: 0)
-			result = 31 * result + (customFoldRegion?.hashCode() ?: 0)
-			result = 31 * result + (commentHighlighterEx?.hashCode() ?: 0)
+			result = 31 * result + lineType.hashCode()
+			result = 31 * result + customFoldRegion.hashCode()
+			result = 31 * result + commentHighlighterEx.hashCode()
 			return result
 		}
 	}
 
-	private data class RenderData(var renderChar: CharArray, var rgb: Int? = null){
-		val canMerge: Boolean
-			get() = renderChar.isEmpty() || renderChar.all { it.isWhitespace() }
+	private data class RenderData(val renderChar: CharArray, val rgb: Int? = null){
 		override fun equals(other: Any?): Boolean {
 			if (this === other) return true
 			if (javaClass != other?.javaClass) return false
@@ -729,6 +813,10 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 			return result
 		}
 	}
+
+	private data class HighlightEvent(val offset: Int, val priority: Int, val activate: Boolean)
+
+	private data class ResolvedHighlightRange(val startOffset: Int, var endOffset: Int, val rgb: Int)
 
 	private enum class LineType{MARK, CUSTOM_FOLD}
 

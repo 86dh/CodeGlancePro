@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## 项目概览
-`CodeGlancePro` 是一个基于 Gradle Kotlin DSL 的多模块 IntelliJ Platform 插件项目，目标是为 IntelliJ IDEA 系列 IDE 提供增强版代码缩略图与滚动条体验。仓库采用“根模块负责打包与公共入口，子模块负责平台适配”的结构：
+`CodeGlancePro` 是一个基于 JetBrains Platform / IntelliJ Platform 的插件项目，使用 Gradle Kotlin DSL 组织多模块构建，目标是为 IntelliJ IDEA 系列 IDE 提供增强版代码缩略图与滚动条体验。仓库采用“根模块负责打包与公共入口，子模块负责平台适配”的结构：
 
 - `src\main\kotlin` 与 `src\main\java`：根模块主逻辑，包含 minimap 渲染、面板注入、滚动条联动、监听器、动作以及 Java Agent 入口。
 - `core\src\main\kotlin`：公共配置、UI 组件、工具类、国际化与颜色方案等共享能力。
@@ -44,7 +44,7 @@
 - 仓库文档、注释、说明性输出优先使用中文；代码标识符保持现有英文命名风格。
 
 ## 常用命令
-在仓库根目录执行：
+以下 Gradle 命令仅作为本地手动运行方式参考；代理执行编译或构建验证时，优先使用 JetBrains MCP 的 `jetbrains_build_project` 工具，不直接调用 Gradle 构建命令。
 
 - `.\gradlew.bat build`：构建所有模块并生成插件产物。
 - `.\gradlew.bat runIde`：启动默认 IntelliJ IDEA sandbox。
@@ -54,7 +54,15 @@
 
 执行命令约束：
 
+- 编译、构建验证统一优先使用 `jetbrains_build_project`；只有该工具不可用、用户明确要求或需要排查 Gradle Wrapper 本身问题时，才考虑直接运行 `.\gradlew.bat build` 等 Gradle 命令，并说明原因。
 - 用户明确禁止时，不得运行任何 Gradle 测试命令。
+
+## JetBrains Platform 源码查询
+涉及 IntelliJ Platform SDK、JetBrains Runtime、IDEA 平台 API、扩展点、编辑器模型、滚动条、`MarkupModel`、`DaemonCodeAnalyzer`、`ActionSystem`、`PersistentStateComponent` 等源码级问题时，优先通过 MCP 技能或 MCP 工具查询 JetBrains 官方源码库、官方 SDK 文档和对应版本源码，不凭记忆猜 API 行为。
+
+查询源码前先确认本项目使用的平台版本与插件依赖，重点查看 `gradle.properties`、`build.gradle.kts`、`settings.gradle.kts` 和各模块 `build.gradle.kts`。检索时优先匹配当前平台版本；如果没有完全一致的源码，再选择最接近版本并说明差异风险。
+
+如果 MCP 官方源码查询不可用，才降级为本地 Gradle 缓存、IDE 反编译源码、仓库已有代码或公开官方文档，并在答复中标注来源和不确定性。
 
 ## 代码搜索与修改策略
 代理在这个仓库中工作时，优先遵循以下顺序：
@@ -109,7 +117,7 @@
   - 必要时同步 README 中的对外说明
 
 ## 测试与验证原则
-无需生成测试代码以及运行测试命令
+无需生成测试代码以及运行测试命令。需要做编译级验证时，使用 `jetbrains_build_project` 代替 Gradle 命令；如果无法使用该工具，应说明未验证原因和剩余风险。
 
 ## 提交与 PR 规范
 - 提交信息保持简短、祈使式、聚焦单一变更，长度尽量控制在 50 个字符以内。

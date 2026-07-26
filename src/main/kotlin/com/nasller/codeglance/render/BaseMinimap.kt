@@ -36,6 +36,8 @@ import java.awt.Color
 import java.awt.Font
 import java.awt.Graphics2D
 import java.awt.image.BufferedImage
+import java.awt.image.DataBufferInt
+import java.awt.image.SinglePixelPackedSampleModel
 import java.beans.PropertyChangeListener
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.floor
@@ -57,7 +59,7 @@ abstract class BaseMinimap(protected val glancePanel: GlancePanel): InlayModel.L
 	protected val virtualFile = editor.virtualFile ?: runReadActionBlocking { glancePanel.psiDocumentManager.getCachedPsiFile(glancePanel.editor.document)?.viewProvider?.virtualFile }
 	protected val isLogFile = virtualFile?.run { fileType::class.qualifiedName?.contains("ideolog") } == true
 	protected val lock = AtomicBoolean(false)
-	private val scaleBuffer = IntArray(4)
+	private val scaleBuffer = IntArray(3)
 
 	abstract fun getImageOrUpdate(): BufferedImage?
 
@@ -214,13 +216,12 @@ abstract class BaseMinimap(protected val glancePanel: GlancePanel): InlayModel.L
 			in 33..126 -> 0.8f
 			else -> 0.4f
 		}
-		val weights = when (pixelsPerLine.coerceIn(1, 4)) {
-			1 -> floatArrayOf(weight * 0.6f)
-			2 -> floatArrayOf(weight * 0.3f, weight * 0.6f)
-			3 -> floatArrayOf(weight * 0.1f, weight * 0.6f, weight * 0.6f)
-			else -> floatArrayOf(0f, weight * 0.6f, weight * 0.6f, weight * 0.6f)
+		when (pixelsPerLine.coerceIn(1, 4)) {
+			1 -> fillRasterizedPixels(xStart, xEnd, yStart, yEnd, 1, weight * 0.6f)
+			2 -> fillRasterizedPixels(xStart, xEnd, yStart, yEnd, 2, weight * 0.3f, weight * 0.6f)
+			3 -> fillRasterizedPixels(xStart, xEnd, yStart, yEnd, 3, weight * 0.1f, weight * 0.6f, weight * 0.6f)
+			else -> fillRasterizedPixels(xStart, xEnd, yStart, yEnd, 4, 0f, weight * 0.6f, weight * 0.6f, weight * 0.6f)
 		}
-		fillRasterizedPixels(xStart, xEnd, yStart, yEnd, weights)
 	}
 
 	private fun BufferedImage.renderAccurate(
@@ -233,13 +234,14 @@ abstract class BaseMinimap(protected val glancePanel: GlancePanel): InlayModel.L
 	) {
 		val topWeight = getTopWeight(char)
 		val bottomWeight = getBottomWeight(char)
-		val weights = when (pixelsPerLine.coerceIn(1, 4)) {
-			1 -> floatArrayOf((topWeight + bottomWeight) / 2)
-			2 -> floatArrayOf(topWeight * 0.5f, bottomWeight)
-			3 -> floatArrayOf(topWeight * 0.3f, (topWeight + bottomWeight) / 2, bottomWeight * 0.7f)
-			else -> floatArrayOf(0f, topWeight, (topWeight + bottomWeight) / 2, bottomWeight)
+		when (pixelsPerLine.coerceIn(1, 4)) {
+			1 -> fillRasterizedPixels(xStart, xEnd, yStart, yEnd, 1, (topWeight + bottomWeight) / 2)
+			2 -> fillRasterizedPixels(xStart, xEnd, yStart, yEnd, 2, topWeight * 0.5f, bottomWeight)
+			3 -> fillRasterizedPixels(xStart, xEnd, yStart, yEnd, 3, topWeight * 0.3f,
+				(topWeight + bottomWeight) / 2, bottomWeight * 0.7f)
+			else -> fillRasterizedPixels(xStart, xEnd, yStart, yEnd, 4, 0f, topWeight,
+				(topWeight + bottomWeight) / 2, bottomWeight)
 		}
-		fillRasterizedPixels(xStart, xEnd, yStart, yEnd, weights)
 	}
 
 	private fun BufferedImage.fillRasterizedPixels(
@@ -247,38 +249,53 @@ abstract class BaseMinimap(protected val glancePanel: GlancePanel): InlayModel.L
 		xEnd: Int,
 		yStart: Int,
 		yEnd: Int,
-		baseWeights: FloatArray
+		weightCount: Int,
+		weight0: Float,
+		weight1: Float = 0f,
+		weight2: Float = 0f,
+		weight3: Float = 0f
 	) {
 		val rasterHeight = yEnd - yStart
-		if (rasterHeight <= 0 || xEnd <= xStart) return
-		val lastWeightIndex = baseWeights.lastIndex
+		val clippedXStart = xStart.coerceAtLeast(0)
+		val clippedXEnd = xEnd.coerceAtMost(width)
+		if (rasterHeight <= 0 || clippedXEnd <= clippedXStart) return
+		val dataBuffer = raster.dataBuffer as DataBufferInt
+		val sampleModel = raster.sampleModel as SinglePixelPackedSampleModel
+		val pixels = dataBuffer.data
+		val scanlineStride = sampleModel.scanlineStride
+		val rasterOffset = dataBuffer.offset - raster.sampleModelTranslateX -
+			raster.sampleModelTranslateY * scanlineStride
+		val rgb = (scaleBuffer[0] shl 16) or (scaleBuffer[1] shl 8) or scaleBuffer[2]
+		val lastWeightIndex = weightCount - 1
 		for (row in 0 until rasterHeight) {
 			// 物理行映射回逻辑权重坐标后做线性插值，避免整数索引把每个权重阶梯式复制成 pixScale 行（块状/最近邻放大）。
-			val weightPos = ((row + 0.5) / rasterHeight) * baseWeights.size - 0.5
+			val weightPos = ((row + 0.5) / rasterHeight) * weightCount - 0.5
 			val alpha = if (lastWeightIndex <= 0) {
-				baseWeights[0]
+				weight0
 			} else {
 				val clamped = weightPos.coerceIn(0.0, lastWeightIndex.toDouble())
 				val lower = floor(clamped).toInt()
 				val upper = (lower + 1).coerceAtMost(lastWeightIndex)
 				val fraction = (clamped - lower).toFloat()
-				baseWeights[lower] + (baseWeights[upper] - baseWeights[lower]) * fraction
+				val lowerWeight = when (lower) {
+					0 -> weight0
+					1 -> weight1
+					2 -> weight2
+					else -> weight3
+				}
+				val upperWeight = when (upper) {
+					0 -> weight0
+					1 -> weight1
+					2 -> weight2
+					else -> weight3
+				}
+				lowerWeight + (upperWeight - lowerWeight) * fraction
 			}
 			if (alpha <= 0f) continue
-			for (col in xStart until xEnd) {
-				setPixel(col, yStart + row, alpha)
-			}
+			val argb = ((alpha * 0xFF).toInt() shl 24) or rgb
+			val rowStart = rasterOffset + (yStart + row) * scanlineStride
+			pixels.fill(argb, rowStart + clippedXStart, rowStart + clippedXEnd)
 		}
-	}
-
-	/**
-	 * mask out the alpha component and set it to the given value.
-	 * *
-	 * @param alpha     alpha percent from 0-1.
-	 */
-	private fun BufferedImage.setPixel(x: Int, y: Int, alpha: Float) {
-		scaleBuffer[3] = (alpha * 0xFF).toInt()
-		raster.setPixel(x, y, scaleBuffer)
 	}
 
 	protected fun createMarkFont(attributes: TextAttributes): Font {

@@ -24,6 +24,13 @@
 	]]></description>
 
 	<change-notes><![CDATA[
+		<h3>2.0.9</h3>
+		<ul>
+			<li>Improve FastMainMinimap rendering performance by writing ARGB pixels directly and reducing temporary allocations.</li>
+			<li>Optimize fast minimap line data merging and whitespace handling for long lines and frequent editor updates.</li>
+			<li>Resolve markup highlight ranges once per visual line to speed up syntax, inspection, search, and caret highlight rendering.</li>
+			<li>Fix minimap refresh during initial scroll state calculation to avoid premature image refresh errors.</li>
+		</ul>
 		<h3>2.0.8</h3>
 		<ul>
 			<li>Improve soft wrap</li>
@@ -35,10 +42,6 @@
 		<h3>2.0.6</h3>
 		<ul>
 			<li>Fix minimap stretching when "show virtual space at the bottom of the file" is enabled.</li>
-		</ul>
-		<h3>2.0.5</h3>
-		<ul>
-			<li>Add an option to control Hidpi</li>
 		</ul>
 	]]></change-notes>
 

@@ -56,7 +56,7 @@ class GlancePanel(info: EditorInfo) : JPanel(), Disposable {
 	var myVcsPanel: MyVcsPanel? = null
 	var isReleased = false
 	val scaleContext = ScaleContext.create(this)
-	private val minimap = updateScrollState().run { editor.editorKind.getMinimap(this@GlancePanel) }
+	val minimap = updateScrollState().run { editor.editorKind.getMinimap(this@GlancePanel) }
 	init {
 		EditorUtil.disposeWithEditor(editor, this)
 		Disposer.register(this, GlanceListener(this))

@@ -3,6 +3,7 @@ package com.nasller.codeglance.render
 import com.nasller.codeglance.config.enums.EditorSizeEnum
 import com.nasller.codeglance.panel.GlancePanel
 import java.awt.Rectangle
+import java.util.*
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -50,7 +51,7 @@ class ScrollState : Cloneable{
             pixelsPerLine = scale * lineHeight
             if((oldDocumentHeight > 0 || !initialized) && oldDocumentHeight != documentHeight) {
                 val oldInitialized = initialized.apply { initialized = true }
-                if(visibleChange && documentHeight > 0 && pixelsPerLine > 0) {
+                if(visibleChange && documentHeight > 0 && pixelsPerLine > 0 && Objects.nonNull(minimap)) {
                     if(oldInitialized) {
                         refreshImage()
                     }else {
@@ -63,7 +64,7 @@ class ScrollState : Cloneable{
             pixelsPerLine = config.pixelsPerLine.toDouble()
             documentHeight = curDocumentHeight
             val oldScale = scale.apply { scale = newScale }
-            if(visibleChange && !oldScale.isNaN() && oldScale != scale) {
+            if(visibleChange && !oldScale.isNaN() && oldScale != scale && Objects.nonNull(minimap)) {
                 if(initialized.apply { initialized = true }) {
                     refreshImage()
                 }else {
