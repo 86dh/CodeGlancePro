@@ -11,6 +11,7 @@ import kotlin.math.roundToInt
 class ScrollState : Cloneable{
     var pixelsPerLine = 0.0
         private set
+    private var renderHeight = 1
     var scale = Double.NaN
         private set
     var documentHeight = 0
@@ -42,13 +43,20 @@ class ScrollState : Cloneable{
         )
         val newScale = config.pixelsPerLine.toDouble() / lineHeight
         val curDocumentHeight = (contentHeight * newScale).roundToInt()
-        if(config.editorSize == EditorSizeEnum.Fit && curDocumentHeight > visibleArea.height) {
+        val fillEditorHeight = when(config.editorSize) {
+            EditorSizeEnum.Proportional -> false
+            EditorSizeEnum.Fit -> curDocumentHeight > visibleArea.height
+            EditorSizeEnum.Fill -> contentHeight > 0
+        }
+        if(fillEditorHeight) {
             if(visibleArea.height < 1 && initialized) {
                 return true
             }
             val oldDocumentHeight = documentHeight.apply { documentHeight = visibleArea.height }
             scale = documentHeight.toDouble() / contentHeight
             pixelsPerLine = scale * lineHeight
+            // Fill 可以拉开行步距，但代码色块不应超过用户配置的每行像素。
+            renderHeight = min(config.pixelsPerLine.coerceAtLeast(1), max(1.0, pixelsPerLine).toInt())
             if((oldDocumentHeight > 0 || !initialized) && oldDocumentHeight != documentHeight) {
                 val oldInitialized = initialized.apply { initialized = true }
                 if(visibleChange && documentHeight > 0 && pixelsPerLine > 0 && Objects.nonNull(minimap)) {
@@ -62,6 +70,7 @@ class ScrollState : Cloneable{
             }
         }else {
             pixelsPerLine = config.pixelsPerLine.toDouble()
+            renderHeight = max(1.0, pixelsPerLine).toInt()
             documentHeight = curDocumentHeight
             val oldScale = scale.apply { scale = newScale }
             if(visibleChange && !oldScale.isNaN() && oldScale != scale && Objects.nonNull(minimap)) {
@@ -101,7 +110,7 @@ class ScrollState : Cloneable{
         visibleEnd = (visibleStart + drawHeight).coerceAtMost(documentHeight)
     }
 
-    fun getRenderHeight() = max(1.0, pixelsPerLine).toInt()
+    fun getRenderHeight() = renderHeight
 
     public override fun clone(): ScrollState {
         return super.clone() as ScrollState
