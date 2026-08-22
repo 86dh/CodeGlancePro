@@ -22,6 +22,7 @@ import com.intellij.util.Range
 import com.nasller.codeglance.EditorInfo
 import com.nasller.codeglance.config.CodeGlanceConfig.Companion.getWidth
 import com.nasller.codeglance.config.CodeGlanceConfigService
+import com.nasller.codeglance.config.enums.EditorSizeEnum
 import com.nasller.codeglance.listener.GlanceListener
 import com.nasller.codeglance.listener.HideScrollBarListener
 import com.nasller.codeglance.panel.scroll.CustomScrollBarPopup
@@ -55,6 +56,7 @@ class GlancePanel(info: EditorInfo) : JPanel(), Disposable {
 	val markState = MarkState(this)
 	var myVcsPanel: MyVcsPanel? = null
 	var isReleased = false
+	private var additionalPageAtBottomBeforeFill: Boolean? = null
 	val scaleContext = ScaleContext.create(this)
 	val minimap = updateScrollState().run { editor.editorKind.getMinimap(this@GlancePanel) }
 	init {
@@ -85,10 +87,34 @@ class GlancePanel(info: EditorInfo) : JPanel(), Disposable {
 	}
 
 	fun updateScrollState(visibleArea: Rectangle? = null, visibleChange: Boolean = true) = scrollState.run {
+		syncAdditionalPageAtBottom()
 		val visible = visibleArea ?: editor.scrollingModel.visibleArea
 		val repaint = computeDimensions(visible, visibleChange)
 		recomputeVisible(visible, getPixScale())
 		return@run repaint
+	}
+
+	private fun syncAdditionalPageAtBottom() {
+		if (editor.isDisposed) return
+		if (config.editorSize == EditorSizeEnum.Fill) {
+			if (additionalPageAtBottomBeforeFill == null) {
+				additionalPageAtBottomBeforeFill = editor.settings.isAdditionalPageAtBottom
+			}
+			// Fill 需要保留底部空白滚动区，视口框才能与编辑器和原生滚动条同步。
+			if (!editor.settings.isAdditionalPageAtBottom) {
+				editor.settings.isAdditionalPageAtBottom = true
+			}
+		} else {
+			restoreAdditionalPageAtBottom()
+		}
+	}
+
+	private fun restoreAdditionalPageAtBottom() {
+		val previousValue = additionalPageAtBottomBeforeFill ?: return
+		additionalPageAtBottomBeforeFill = null
+		if (!editor.isDisposed && editor.settings.isAdditionalPageAtBottom != previousValue) {
+			editor.settings.isAdditionalPageAtBottom = previousValue
+		}
 	}
 
 	fun checkVisible() = !isReleased && !editor.isDisposed && (config.hoveringToShowScrollBar || isVisible)
@@ -341,6 +367,7 @@ class GlancePanel(info: EditorInfo) : JPanel(), Disposable {
 	override fun dispose() {
 		if(isReleased) return
 		isReleased = true
+		restoreAdditionalPageAtBottom()
 		editor.putUserData(CURRENT_GLANCE, null)
 		editor.putUserData(CURRENT_GLANCE_PLACE_INDEX, null)
 		editor.component.remove(this.parent)

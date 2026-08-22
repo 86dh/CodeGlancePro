@@ -61,7 +61,7 @@ class GlanceListener(private val glancePanel: GlancePanel) : ComponentAdapter(),
 
 	/** VisibleAreaListener */
 	override fun visibleAreaChanged(e: VisibleAreaEvent) {
-		if(glancePanel.config.editorSize == EditorSizeEnum.Fit){
+		if(glancePanel.config.editorSize != EditorSizeEnum.Proportional){
 			if(glancePanel.updateScrollState(e.newRectangle)){
 				repaint()
 			}
