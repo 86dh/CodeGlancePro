@@ -28,7 +28,6 @@ import com.intellij.openapi.util.SystemInfoRt
 import com.intellij.psi.tree.IElementType
 import com.intellij.util.DocumentUtil
 import com.intellij.util.Range
-import com.intellij.util.containers.ContainerUtil
 import com.intellij.util.ui.UIUtil
 import com.nasller.codeglance.panel.GlancePanel
 import com.nasller.codeglance.util.Util.mapSmart
@@ -163,7 +162,8 @@ abstract class BaseMinimap(protected val glancePanel: GlancePanel): InlayModel.L
 				return@processRangeHighlightersOverlappingWith true
 			}
 			if (list.size > 1) {
-				ContainerUtil.quickSort(list, IterationState.createByLayerThenByAttributesComparator(editor.colorsScheme))
+				// Diff 编辑器会集中创建大量重叠高亮；稳定的归并排序可避免 quickSort 在特殊排列下长时间占用 EDT。
+				list.sortWith(IterationState.createByLayerThenByAttributesComparator(editor.colorsScheme))
 			}
 			list.mapSmart { RangeHighlightColor(it.affectedAreaStartOffset, it.affectedAreaEndOffset, it.getTextAttributes(editor.colorsScheme)?.foregroundColor!!) }
 		}.getOrElse { emptyList() }

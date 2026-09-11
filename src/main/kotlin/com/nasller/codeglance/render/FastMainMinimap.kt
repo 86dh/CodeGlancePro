@@ -2,6 +2,7 @@ package com.nasller.codeglance.render
 
 import com.intellij.ide.ui.UISettings
 import com.intellij.openapi.application.*
+import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.Attachment
 import com.intellij.openapi.editor.*
 import com.intellij.openapi.editor.event.DocumentEvent
@@ -18,14 +19,12 @@ import com.intellij.openapi.editor.impl.softwrap.mapping.IncrementalCacheUpdateE
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.util.text.StringUtil
-import com.intellij.util.DocumentEventUtil
-import com.intellij.util.DocumentUtil
-import com.intellij.util.MathUtil
-import com.intellij.util.Range
+import com.intellij.util.*
 import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.util.containers.ContainerUtil
 import com.intellij.util.text.CharArrayUtil
 import com.intellij.util.ui.EdtInvocationManager
+import com.nasller.codeglance.config.CodeGlanceConfigService
 import com.nasller.codeglance.panel.GlancePanel
 import com.nasller.codeglance.util.MyVisualLinesIterator
 import com.nasller.codeglance.util.Util.isMarkAttributes
@@ -58,6 +57,13 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 	}.also { editor.softWrapModel.addSoftWrapListener(it) }
 	private var previewImg = EMPTY_IMG
 	private val myRenderDirty = AtomicBoolean(false)
+	private val rangeHighlightUpdateAlarm = SingleAlarm.singleAlarm(
+		RANGE_HIGHLIGHT_UPDATE_DELAY_MS,
+		service<CodeGlanceConfigService>().coroutineScope
+	) { flushRangeHighlightUpdates() }
+	private val rangeHighlightUpdateLock = Any()
+	private var pendingRangeHighlightStartOffset = Int.MAX_VALUE
+	private var pendingRangeHighlightEndOffset = Int.MIN_VALUE
 	init {
 		makeListener()
 		editor.addHighlighterListener(this, this)
@@ -236,7 +242,7 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 		}
 	}
 
-	private fun updateMinimapData(visLinesIterator: MyVisualLinesIterator, endVisualLine: Int){
+	private fun updateMinimapData(visLinesIterator: MyVisualLinesIterator, endVisualLine: Int?){
 		val text = myDocument.immutableCharSequence
 		val markCommentMap = glancePanel.markState.getAllMarkHighlight()
 			.associateBy { DocumentUtil.getLineStartOffset(it.startOffset, myDocument) }
@@ -364,7 +370,7 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 					renderDataList[visualLine] = DefaultLineRenderData
 				}
 			}
-			if(endVisualLine == 0 || visualLine <= endVisualLine) visLinesIterator.advance()
+			if(endVisualLine == null || visualLine <= endVisualLine) visLinesIterator.advance()
 			else break
 		}
 		updateMinimapImage()
@@ -606,11 +612,11 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 				return@invokeLaterIfNeeded
 			}
 			when(highlighter){
-				is MarkState.BookmarkHighlightDelegate -> updateRangeHighlight(highlighter.startOffset, highlighter.endOffset)
+				is MarkState.BookmarkHighlightDelegate -> queueRangeHighlightUpdate(highlighter.startOffset, highlighter.endOffset)
 				is RangeHighlighterEx -> {
 					if(highlighter.isThinErrorStripeMark.not() && (highlighter.textAttributesKey?.isMarkAttributes() == true ||
 								EditorUtil.attributesImpactForegroundColor(highlighter.getTextAttributes(editor.colorsScheme)))){
-						updateRangeHighlight(highlighter.affectedAreaStartOffset, highlighter.affectedAreaEndOffset)
+						queueRangeHighlightUpdate(highlighter.affectedAreaStartOffset, highlighter.affectedAreaEndOffset)
 					}else if(highlighter.getErrorStripeMarkColor(editor.colorsScheme) != null){
 						glancePanel.repaint()
 					}
@@ -619,12 +625,37 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 		}
 	}
 
-	private fun updateRangeHighlight(startOffset: Int, endOffset: Int) {
+	private fun queueRangeHighlightUpdate(startOffset: Int, endOffset: Int) {
 		val textLength = myDocument.textLength
 		val start = MathUtil.clamp(startOffset, 0, textLength)
 		val end = MathUtil.clamp(endOffset, start, textLength)
-		if (start != end) {
-			invalidateRange(start, end)
+		if (start == end) return
+		synchronized(rangeHighlightUpdateLock) {
+			pendingRangeHighlightStartOffset = min(pendingRangeHighlightStartOffset, start)
+			pendingRangeHighlightEndOffset = max(pendingRangeHighlightEndOffset, end)
+		}
+		rangeHighlightUpdateAlarm.cancelAndRequest()
+	}
+
+	private fun flushRangeHighlightUpdates() {
+		if (!ApplicationManager.getApplication().isDispatchThread) {
+			invokeLater(modalityState) { flushRangeHighlightUpdates() }
+			return
+		}
+		val range = synchronized(rangeHighlightUpdateLock) {
+			if (pendingRangeHighlightStartOffset > pendingRangeHighlightEndOffset) return
+			val result = pendingRangeHighlightStartOffset to pendingRangeHighlightEndOffset
+			pendingRangeHighlightStartOffset = Int.MAX_VALUE
+			pendingRangeHighlightEndOffset = Int.MIN_VALUE
+			result
+		}
+		if (!glancePanel.checkVisible() || myDocument.isInBulkUpdate || editor.inlayModel.isInBatchMode || myDuringDocumentUpdate) return
+		val startVisualLine = editor.offsetToVisualLine(range.first, false)
+		val endVisualLine = editor.offsetToVisualLine(range.second, true)
+		if (endVisualLine - startVisualLine > MAX_SYNCHRONOUS_HIGHLIGHT_LINES) {
+			resetMinimapData()
+		}else {
+			invalidateRange(range.first, range.second)
 		}
 	}
 
@@ -636,7 +667,7 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 
 	/** HighlighterListener */
 	override fun highlighterChanged(startOffset: Int, endOffset: Int) {
-		invalidateRange(startOffset, endOffset)
+		queueRangeHighlightUpdate(startOffset, endOffset)
 	}
 
 	private fun invalidateRange(startOffset: Int, endOffset: Int) {
@@ -688,7 +719,7 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 			if(reset) {
 				myResetDataPromise = ReadAction.nonBlocking<Unit> {
 //					val startTime = System.currentTimeMillis()
-					updateMinimapData(visLinesIterator, 0)
+					updateMinimapData(visLinesIterator, null)
 //					println("updateMinimapData time: ${System.currentTimeMillis() - startTime}")
 				}.withDocumentsCommitted(glancePanel.project).coalesceBy(this).expireWith(this)
 					.finishOnUiThread(ModalityState.any()) {
@@ -757,6 +788,11 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 	}
 
 	override fun dispose() {
+		rangeHighlightUpdateAlarm.cancel()
+		synchronized(rangeHighlightUpdateLock) {
+			pendingRangeHighlightStartOffset = Int.MAX_VALUE
+			pendingRangeHighlightEndOffset = Int.MIN_VALUE
+		}
 		rangeList.clear()
 		editor.softWrapModel.removeSoftWrapListener(mySoftWrapChangeListener)
 		previewImg.flush()
@@ -823,6 +859,8 @@ class FastMainMinimap(glancePanel: GlancePanel) : BaseMinimap(glancePanel), High
 	@Suppress("UNCHECKED_CAST")
 	companion object{
 		private val LOG = LoggerFactory.getLogger(FastMainMinimap::class.java)
+		private const val RANGE_HIGHLIGHT_UPDATE_DELAY_MS = 50
+		private const val MAX_SYNCHRONOUS_HIGHLIGHT_LINES = 256
 		private const val HOOK_ON_REGION_REPARSE_END_METHOD = "onRegionReparseEnd"
 		private const val HOOK_ON_ALL_DIRTY_REGIONS_REPARSED_METHOD = "onAllDirtyRegionsReparsed"
 		private const val HOOK_RESET_METHOD = "reset"
